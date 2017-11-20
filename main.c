@@ -23,8 +23,8 @@ extern int opterr;
 extern int optreset;
 #endif
 
-#define VERSION_RELASE_DATE "20170616"
-#define VERSION "1.1"
+#define VERSION_RELASE_DATE "20170116"
+#define VERSION "1.0"
 #define VERSION_NOTES ""
 
 programmer_t pgms[] = {
@@ -56,6 +56,8 @@ void print_help_and_exit(const char *name, bool err) {
 	fprintf(stream, "Options:\n");
 	fprintf(stream, "\t-?             Display this help\n");
 	fprintf(stream, "\t-c programmer  Specify programmer used (stlink or stlinkv2)\n");
+	fprintf(stream, "\t-d             List programmers \n");
+	fprintf(stream, "\t-n number      Specify programmer index\n");
 	fprintf(stream, "\t-p partno      Specify STM8 device\n");
 	fprintf(stream, "\t-l             List supported STM8 devices\n");
 	fprintf(stream, "\t-s memtype     Specify memory type (flash, eeprom, ram, opt or explicit address)\n");
@@ -92,7 +94,7 @@ bool is_ext(const char *filename, const char *ext) {
 	return(ext_begin && strcmp(ext_begin, ext) == 0);
 }
 
-bool usb_init(programmer_t *pgm, unsigned int vid, unsigned int pid) {
+bool usb_init(programmer_t *pgm, unsigned int vid, unsigned int pid, char index) {
 	libusb_device **devs;
 	libusb_context *ctx = NULL;
 
@@ -109,7 +111,14 @@ bool usb_init(programmer_t *pgm, unsigned int vid, unsigned int pid) {
 	cnt = libusb_get_device_list(ctx, &devs);
 	if(cnt < 0) return(false);
 
-	pgm->dev_handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
+	if(index != -1 && index < cnt) {
+		libusb_device_handle *dev_handle=0;
+		libusb_open(devs[index], &dev_handle);
+		pgm->dev_handle = dev_handle;
+	}
+	else {
+		pgm->dev_handle = libusb_open_device_with_vid_pid(ctx, vid, pid);
+	}
 	pgm->ctx = ctx;
 	if (!pgm->dev_handle) spawn_error("Could not open USB device.");
 	// assert(pgm->dev_handle);
@@ -142,13 +151,74 @@ const stm8_device_t *get_part(const char *name)
 	return(0);
 }
 
+const int isStlink(unsigned int vid, unsigned int pid) {
+	int i = 0;
+	while(pgms[i].name != NULL) {
+		if(vid == pgms[i].usb_vid && pid == pgms[i].usb_pid) {
+			return i;
+		}
+		i++;
+	}
+	return -1;
+}
+
+const void print_devs(const libusb_device **devs)
+{
+	libusb_device *dev;
+	int i = 0, j = 0;
+	uint8_t path[8]; 
+
+	while ((dev = devs[i++]) != NULL) {
+		struct libusb_device_descriptor desc;
+		int r = libusb_get_device_descriptor(dev, &desc);
+		if (r < 0) {
+			fprintf(stderr, "failed to get device descriptor");
+			return;
+		}
+		int index = isStlink(desc.idVendor, desc.idProduct);
+		if(index != -1) {
+			printf("%04x:%04x (bus %d, device %d)",
+				desc.idVendor, desc.idProduct,
+				libusb_get_bus_number(dev), libusb_get_device_address(dev));
+
+			r = libusb_get_port_numbers(dev, path, sizeof(path));
+			if (r > 0) {
+				printf(" path: %d", path[0]);
+				for (j = 1; j < r; j++)
+					printf(".%d", path[j]);
+			}
+			printf(" programmer: %s number:%d\n", pgms[index].name, i-1);
+		}
+	}
+}
+
+int listProgrammers() {
+	libusb_device **devs;
+	int r;
+	ssize_t cnt;
+
+	r = libusb_init(NULL);
+	if (r < 0)
+		return r;
+
+	cnt = libusb_get_device_list(NULL, &devs);
+	if (cnt < 0)
+		return (int) cnt;
+
+	print_devs(devs);
+	libusb_free_device_list(devs, 1);
+
+	libusb_exit(NULL);	
+	return 0;
+}
+
 int main(int argc, char **argv) {
 	unsigned int start;
 	int bytes_count = 0;
 	char filename[256];
 	memset(filename, 0, sizeof(filename));
 	// Parsing command line
-	char c;
+	char c, programmer_index=-1;
 	action_t action = NONE;
 	bool start_addr_specified = false,
 		pgm_specified = false,
@@ -158,7 +228,7 @@ int main(int argc, char **argv) {
 	int i;
 	programmer_t *pgm = NULL;
 	const stm8_device_t *part = NULL;
-	while((c = getopt (argc, argv, "r:w:v:nc:p:s:b:luV")) != (char)-1) {
+	while((c = getopt (argc, argv, "n:r:w:v:nc:p:s:b:dluV")) != (char)-1) {
 		switch(c) {
 			case 'c':
 				pgm_specified = true;
@@ -170,6 +240,13 @@ int main(int argc, char **argv) {
 			case 'p':
 				part_specified = true;
 				part = get_part(optarg);
+				break;
+			case 'n':
+				programmer_index = atoi(optarg);
+				break;
+			case 'd':
+				listProgrammers();
+				return 0;
 				break;
 			case 'l':
 				for(i = 0; stm8_devices[i].name; i++)
@@ -188,7 +265,7 @@ int main(int argc, char **argv) {
 				action = VERIFY;
 				strcpy(filename, optarg);
 				break;
-                        case 'u':
+            case 'u':
 				action = UNLOCK;
 				start  = 0x4800;
 				memtype = OPT;
@@ -207,7 +284,7 @@ int main(int argc, char **argv) {
 				} else {
 					// Start addr is specified explicitely
 					memtype = UNKNOWN;
-					int success = sscanf(optarg, "%x", (unsigned*)&start);
+					int success = sscanf(optarg, "%x", &start);
 					assert(success);
                     start_addr_specified = true;
 				}
@@ -309,7 +386,7 @@ int main(int argc, char **argv) {
 		spawn_error("No filename has been specified");
 	if(!action || !start_addr_specified || !strlen(filename))
 		print_help_and_exit(argv[0], true);
-	if(!usb_init(pgm, pgm->usb_vid, pgm->usb_pid))
+	if(!usb_init(pgm, pgm->usb_vid, pgm->usb_pid, programmer_index))
 		spawn_error("Couldn't initialize stlink");
 	if(!pgm->open(pgm))
 		spawn_error("Error communicating with MCU. Please check your SWIM connection.");
@@ -436,13 +513,12 @@ int main(int argc, char **argv) {
 	} else if (action == UNLOCK) {
 		int bytes_to_write=part->option_bytes_size;
 
-		if (part->read_out_protection_mode == ROP_UNKNOWN) spawn_error("No unlocking mode defined for this device. You may need to edit the file stm8.c");
-		if (part->read_out_protection_mode != ROP_STM8S) spawn_error("Unimplemented unlocking mode");
+		if (part->read_out_protection_mode==ROP_UNKNOWN) spawn_error("No unlocking mode defined for this device. You may need to edit the file stm8.c");
 
 		unsigned char *buf=malloc(bytes_to_write);
 		if(!buf) spawn_error("malloc failed");
 
-		if (part->read_out_protection_mode == ROP_STM8S) {
+		if (part->read_out_protection_mode==ROP_STM8S_STD) {
 			for (int i=0; i<bytes_to_write;i++) {
 				buf[i]=0;
 				if ((i>0)&&((i&1)==0)) buf[i]=0xff;
